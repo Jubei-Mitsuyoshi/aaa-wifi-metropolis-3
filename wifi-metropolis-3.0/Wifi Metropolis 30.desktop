@@ -1,0 +1,13 @@
+
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Wifi Metropolis 3
+Comment=Wifi Metropolis 3 developed by Ozyart
+Path=
+Terminal=false
+StartupNotify=false
+GenericName=Wifi Metropolis 3 developed by Ozyart
+Exec=gksu gbr3 '/opt/Wifi_Metropolis/Wifi Metropolis 3'
+Icon=/opt/Wifi_Metropolis/wifimetropolis3.png
+

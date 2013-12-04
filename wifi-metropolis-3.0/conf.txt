@@ -1,0 +1,7 @@
+HashCatPlus ATI - 32 or 64
+#/oclHashcat/oclHashcat-plus32.bin
+
+HashCatPlus NVidia - 32 or 64
+#/oclHashcat/cudaHashcat-plus32.bin
+
+
